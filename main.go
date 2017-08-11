@@ -16,6 +16,8 @@ import (
   "sort"
   "path/filepath"
   "compress/gzip"
+  "github.com/akotlar/bystro-utils/vcf"
+  "encoding/json"
 )
 
 const concurrency int = 16
@@ -55,12 +57,17 @@ func main() {
 
   ranges := readBed(config.bedPath)
 
+  b, _ := json.MarshalIndent(ranges, "", "  ")
+
+  log.Println(string(b))
+
   seen := make(map[string]int)
   readVcf(config.vcfGlob, ranges, func(data []string) {
     if seen[data[0]] == 0 {
       fmt.Print(data[1])
-      seen[data[0]]++
     }
+
+    seen[data[0]]++
   })
 
   for id, count := range seen {
@@ -150,7 +157,7 @@ func readVcf (vcfGlob string, ranges map[string][][]int, resultFunc func(data []
   foundHeader := false
 
   files, err := filepath.Glob(vcfGlob)
-
+  log.Println(files)
   if err != nil {
     log.Fatal(err)
   }
@@ -247,7 +254,7 @@ func readVcf (vcfGlob string, ranges map[string][][]int, resultFunc func(data []
   
 
   // Wait for everyone to finish.
-  for i := 0; i < concurrency; i++ {
+  for i := 0; i < len(files); i++ {
     <-complete
   }
 
@@ -301,28 +308,42 @@ func processLines(file string, ranges map[string][][]int, results chan []string,
 
     record := strings.Split(row[:len(row) - numChars], "\t")
 
-    if record[6] != "PASS" {
+    if record[vcf.FilterIdx] != "PASS" {
       continue
     }
 
-    if row[0:3] == "chr" {
-      arr = ranges[record[0]]
+    if record[vcf.ChromIdx][0:3] == "chr" {
+      arr = ranges[record[vcf.ChromIdx]]
     } else {
       var buffer bytes.Buffer
 
       buffer.WriteString("chr")
-      buffer.WriteString(record[0])
+      buffer.WriteString(record[vcf.ChromIdx])
 
-      record[0] = buffer.String()
+      record[vcf.ChromIdx] = buffer.String()
 
-      arr = ranges[record[0]]
+      arr = ranges[record[vcf.ChromIdx]]
     }
 
     if arr == nil {
       continue
     }
 
-    pos, err = strconv.Atoi(record[1])
+    // If multiallelic, don't bother decomposing for now, 
+    // we are going to be within 1 base of the pos position, and therefore
+    // likely wihtin our bed window, since we've expanded that to 1 base larger
+    // than needed on each side
+    if strings.Contains(record[vcf.AltIdx], ",") {
+      pos, err = strconv.Atoi(record[vcf.PosIdx])
+    } else {
+      _, strPos, _, _, err := vcf.UpdateFieldsWithAlt(record[vcf.RefIdx], record[vcf.AltIdx], record[vcf.PosIdx], false)
+      
+      if err != nil {
+        log.Fatal(err)
+      }
+
+      pos, err = strconv.Atoi(strPos)
+    }
 
     if err != nil {
       log.Fatal(err)
@@ -344,8 +365,6 @@ func processLines(file string, ranges map[string][][]int, results chan []string,
         buffer.WriteString(record[4])
 
         results <- []string{buffer.String(), row}
-        break
-      } else if pos > arr[i][1] {
         break
       }
     }
